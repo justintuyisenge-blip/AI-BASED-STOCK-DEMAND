@@ -1,5 +1,10 @@
 import { SupabaseClient } from '@supabase/supabase-js';
-import { Forecast, ForecastDaily, Product } from '../types/database';
+import {
+  Forecast,
+  ForecastDaily,
+  Product,
+  StockBatch,
+} from '../types/database';
 
 export type AlertType =
   | 'stock_out_risk'
@@ -13,13 +18,56 @@ export interface ProductAlert {
   alertType: AlertType;
   alertLabel: string;
   priority: number; // 1 = Stock-out risk (highest), 2 = Low stock, 3 = Overstock, 4 = Slow mover
-  currentStock: number;
+  currentStock: number; // Sellable stock for tracked products, current_stock for untracked
+  onHandStock: number; // Total on-hand current_stock
   reorderLevel: number;
   predictedDemand30d: number | null;
   predictedDemand14d: number | null;
   daysOfStockLeft: number | null;
   stockOutDate: string | null;
   suggestedReorder: number | null;
+}
+
+export function getTodayLocalStr(): string {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * Compute map of product_id -> total units in expired active batches.
+ */
+export function computeExpiredActiveUnitsByProduct(
+  batches: StockBatch[],
+  todayStr: string = getTodayLocalStr()
+): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const b of batches) {
+    if (
+      b.status === 'active' &&
+      b.quantity_remaining > 0 &&
+      b.expiry_date < todayStr
+    ) {
+      map.set(b.product_id, (map.get(b.product_id) || 0) + b.quantity_remaining);
+    }
+  }
+  return map;
+}
+
+/**
+ * Sellable stock = current_stock minus units in expired active batches for tracked products.
+ */
+export function getSellableStock(
+  product: Product,
+  expiredUnitsByProduct?: Map<string, number>
+): number {
+  if (!product.tracks_expiry || !expiredUnitsByProduct) {
+    return product.current_stock;
+  }
+  const expiredUnits = expiredUnitsByProduct.get(product.id) || 0;
+  return Math.max(0, product.current_stock - expiredUnits);
 }
 
 /**
@@ -61,45 +109,40 @@ export async function fetchAllForecastDailyForRun(
 
 /**
  * Compute alerts from products, forecast_daily, and the latest forecast run.
- *
- * Rules:
- * - Low stock: current_stock <= reorder_level.
- * - Predicted stock-out: cumulative predicted demand over next 30 days > current_stock.
- *   Shows the estimated stock-out date from forecast_daily.
- * - Overstock: current_stock > 45 days of predicted demand ((predicted_30d / 30) * 45).
- * - Slow mover: bottom 10% of active products by predicted 30-day units,
- *   EXCLUDING any product that has Low stock or Stock-out risk (no contradictions).
- * - Suggested reorder quantity (for low-stock and stock-out items):
- *   Math.max(0, Math.ceil(predicted_14d_demand + reorder_level - current_stock))
+ * Uses sellable stock (current_stock minus expired active batch units) for tracked products.
  */
 export function computeProductAlerts(params: {
   products: Product[];
   forecasts: Forecast[];
   forecastDaily: ForecastDaily[];
+  batches?: StockBatch[];
   isManager: boolean;
 }): ProductAlert[] {
-  const { products, forecasts, forecastDaily, isManager } = params;
+  const { products, forecasts, forecastDaily, batches = [], isManager } = params;
+  const expiredUnitsByProduct = computeExpiredActiveUnitsByProduct(batches);
 
-  // Clerks only see Low stock alerts based on products only (no forecast or profit data)
+  // Clerks only see Low stock alerts based on products (using sellable stock) with no forecast or profit data
   if (!isManager) {
     return products
-      .filter((p) => p.current_stock <= p.reorder_level)
       .map((p) => ({
+        product: p,
+        sellable: getSellableStock(p, expiredUnitsByProduct),
+      }))
+      .filter(({ product, sellable }) => sellable <= product.reorder_level)
+      .map(({ product: p, sellable }) => ({
         id: `${p.id}_low_stock`,
         product: p,
         alertType: 'low_stock' as const,
         alertLabel: 'Low stock',
         priority: 2,
-        currentStock: p.current_stock,
+        currentStock: sellable,
+        onHandStock: p.current_stock,
         reorderLevel: p.reorder_level,
         predictedDemand30d: null,
         predictedDemand14d: null,
         daysOfStockLeft: null,
         stockOutDate: null,
-        suggestedReorder: Math.max(
-          0,
-          Math.ceil(p.reorder_level - p.current_stock)
-        ),
+        suggestedReorder: Math.max(0, Math.ceil(p.reorder_level - sellable)),
       }))
       .sort(
         (a, b) =>
@@ -132,11 +175,18 @@ export function computeProductAlerts(params: {
 
   const hasForecast = forecast30ByProduct.size > 0;
 
-  // Identify slow movers: bottom 10% of active products by predicted 30-day units
+  // Identify slow movers: bottom 10% of forecasted products by predicted 30-day units
+  // (Leave new products without a forecast out of forecast-based alerts)
   const slowMoverIds = new Set<string>();
-  if (hasForecast && products.length > 0) {
-    const bottomCount = Math.max(1, Math.floor(products.length * 0.1));
-    const rankedBy30d = [...products]
+  const forecastedProducts = products.filter((p) =>
+    forecast30ByProduct.has(p.id)
+  );
+  if (hasForecast && forecastedProducts.length > 0) {
+    const bottomCount = Math.max(
+      1,
+      Math.floor(forecastedProducts.length * 0.1)
+    );
+    const rankedBy30d = [...forecastedProducts]
       .map((p) => ({
         id: p.id,
         units30: forecast30ByProduct.get(p.id)?.predicted_units ?? 0,
@@ -152,14 +202,18 @@ export function computeProductAlerts(params: {
 
   for (const product of products) {
     const f30 = forecast30ByProduct.get(product.id);
+    const productHasForecast = Boolean(f30);
     const dailyList = dailyByProduct.get(product.id) || [];
 
-    const predicted30d = hasForecast
+    // Use sellable stock (current_stock minus expired active batch units) for tracked products
+    const sellableStock = getSellableStock(product, expiredUnitsByProduct);
+
+    const predicted30d = productHasForecast
       ? f30?.predicted_units ??
         dailyList.reduce((acc, item) => acc + item.predicted_units, 0)
       : null;
 
-    const predicted14d = hasForecast
+    const predicted14d = productHasForecast
       ? dailyList.length > 0
         ? dailyList
             .slice(0, 14)
@@ -169,39 +223,39 @@ export function computeProductAlerts(params: {
 
     const dailyRate =
       predicted30d !== null && predicted30d > 0 ? predicted30d / 30 : 0;
-    const daysOfStockLeft = hasForecast
-      ? product.current_stock <= 0
+    const daysOfStockLeft = productHasForecast
+      ? sellableStock <= 0
         ? 0
         : dailyRate > 0
-        ? Math.round(product.current_stock / dailyRate)
+        ? Math.round(sellableStock / dailyRate)
         : 999
       : null;
 
     // Estimated stock-out date:
     // Walk day-by-day in ascending date order starting from the first forecast day (day index 0).
     // The estimated stock-out date is the first forecast day where cumulative predicted demand
-    // from the first forecast day exceeds current_stock (cumulative > current_stock).
+    // from the first forecast day exceeds sellableStock (cumulative > sellableStock).
     let stockOutDate: string | null = null;
-    if (hasForecast && dailyList.length > 0) {
+    if (productHasForecast && dailyList.length > 0) {
       let cumulative = 0;
       for (const dayRow of dailyList) {
         cumulative += dayRow.predicted_units;
-        if (cumulative > product.current_stock) {
+        if (cumulative > sellableStock) {
           stockOutDate = dayRow.forecast_date;
           break;
         }
       }
     } else if (
-      hasForecast &&
+      productHasForecast &&
       predicted30d !== null &&
-      predicted30d > product.current_stock &&
+      predicted30d > sellableStock &&
       predicted30d > 0
     ) {
       // Fallback if daily rows are unavailable: 0-indexed offset from the first forecast day
       // (dayOffset = 0 means stock runs out on the very first forecast day, avoiding an off-by-one shift).
       const dayOffset = Math.max(
         0,
-        Math.min(29, Math.floor((product.current_stock / predicted30d) * 30))
+        Math.min(29, Math.floor((sellableStock / predicted30d) * 30))
       );
       const baseDateStr =
         f30?.forecast_date || new Date().toISOString().slice(0, 10);
@@ -211,35 +265,33 @@ export function computeProductAlerts(params: {
     }
 
     const isStockOutRisk =
-      hasForecast &&
+      productHasForecast &&
       predicted30d !== null &&
-      predicted30d > product.current_stock;
+      predicted30d > sellableStock;
 
-    const isLowStock = product.current_stock <= product.reorder_level;
+    const isLowStock = sellableStock <= product.reorder_level;
 
-    // Overstock: current_stock > 45 days of predicted demand
+    // Overstock: sellableStock > 45 days of predicted demand
     const demand45d =
       predicted30d !== null ? (predicted30d / 30) * 45 : null;
     const isOverstock =
-      hasForecast &&
+      productHasForecast &&
       demand45d !== null &&
       demand45d > 0 &&
-      product.current_stock > demand45d;
+      sellableStock > demand45d;
 
     // A product with Low stock or Stock-out risk must NOT also be labelled Slow mover
     const isSlowMover =
-      hasForecast &&
+      productHasForecast &&
       slowMoverIds.has(product.id) &&
       !isLowStock &&
       !isStockOutRisk;
 
     // Suggested reorder quantity for low-stock and stock-out items:
-    // predicted 14-day demand + reorder_level - current_stock, rounded up, min 0
+    // predicted 14-day demand + reorder_level - sellableStock, rounded up, min 0
     const reorderQty = Math.max(
       0,
-      Math.ceil(
-        (predicted14d ?? 0) + product.reorder_level - product.current_stock
-      )
+      Math.ceil((predicted14d ?? 0) + product.reorder_level - sellableStock)
     );
 
     if (isStockOutRisk) {
@@ -249,7 +301,8 @@ export function computeProductAlerts(params: {
         alertType: 'stock_out_risk',
         alertLabel: 'Stock-out risk',
         priority: 1,
-        currentStock: product.current_stock,
+        currentStock: sellableStock,
+        onHandStock: product.current_stock,
         reorderLevel: product.reorder_level,
         predictedDemand30d: predicted30d,
         predictedDemand14d: predicted14d,
@@ -266,7 +319,8 @@ export function computeProductAlerts(params: {
         alertType: 'low_stock',
         alertLabel: 'Low stock',
         priority: 2,
-        currentStock: product.current_stock,
+        currentStock: sellableStock,
+        onHandStock: product.current_stock,
         reorderLevel: product.reorder_level,
         predictedDemand30d: predicted30d,
         predictedDemand14d: predicted14d,
@@ -283,7 +337,8 @@ export function computeProductAlerts(params: {
         alertType: 'overstock',
         alertLabel: 'Overstock',
         priority: 3,
-        currentStock: product.current_stock,
+        currentStock: sellableStock,
+        onHandStock: product.current_stock,
         reorderLevel: product.reorder_level,
         predictedDemand30d: predicted30d,
         predictedDemand14d: predicted14d,
@@ -300,7 +355,8 @@ export function computeProductAlerts(params: {
         alertType: 'slow_mover',
         alertLabel: 'Slow mover',
         priority: 4,
-        currentStock: product.current_stock,
+        currentStock: sellableStock,
+        onHandStock: product.current_stock,
         reorderLevel: product.reorder_level,
         predictedDemand30d: predicted30d,
         predictedDemand14d: predicted14d,

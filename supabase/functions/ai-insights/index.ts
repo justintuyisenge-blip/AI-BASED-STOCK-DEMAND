@@ -190,7 +190,8 @@ STRICT RULES:
 3. Cover the top 5 urgent alerts (from top_5_urgent_alerts_dashboard_order) FIRST, using the exact product names, stock levels, stock-out dates, and suggested reorder quantities provided.
 4. Use alert labels ("Stock-out risk", "Low stock", "Overstock", "Slow mover") exactly as given.
 5. Never recommend reordering and reducing orders for the same product.
-6. Write a short summary followed by 3-5 specific, actionable recommendations (what to restock, what to slow down, what to watch), in plain English.`;
+6. Review expiry_overview.expired_and_expiring_soon_top_10_by_cost: suggest clearance promotions or discounts for items expiring soon (and write-offs for already expired batches) using only the exact units, dates, and RWF cost values provided.
+7. Write a short summary followed by 3-5 specific, actionable recommendations (what to restock, what expiring items to discount or clear, what to slow down, what to watch), in plain English.`;
 
     // 5. Call OpenRouter with request timeout and max_tokens
     const controller = new AbortController();

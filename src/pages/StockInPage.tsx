@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { Product, StockMovement } from '../types/database';
+import { getTodayLocalStr } from '../lib/alerts';
 import { Card } from '../components/ui/Card';
 import { Input } from '../components/ui/Input';
 import { Button } from '../components/ui/Button';
@@ -16,10 +17,13 @@ export const StockInPage: React.FC = () => {
 
   const [selectedProductId, setSelectedProductId] = useState<string>('');
   const [quantity, setQuantity] = useState<string>('10');
+  const [expiryDate, setExpiryDate] = useState<string>('');
   const [note, setNote] = useState<string>('');
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [formSuccess, setFormSuccess] = useState<string | null>(null);
+
+  const todayStr = useMemo(() => getTodayLocalStr(), []);
 
   const loadData = async () => {
     setLoading(true);
@@ -27,7 +31,7 @@ export const StockInPage: React.FC = () => {
     const { data: prodData } = await supabase
       .from('products')
       .select(
-        'id, name, sku, category_id, cost_price, selling_price, current_stock, reorder_level, is_active'
+        'id, name, sku, category_id, cost_price, selling_price, current_stock, reorder_level, is_active, tracks_expiry'
       )
       .eq('is_active', true)
       .order('name', { ascending: true });
@@ -56,13 +60,20 @@ export const StockInPage: React.FC = () => {
     loadData();
   }, []);
 
+  const selectedProduct = useMemo(
+    () => products.find((p) => p.id === selectedProductId) || null,
+    [products, selectedProductId]
+  );
+
+  const tracksExpiry = Boolean(selectedProduct?.tracks_expiry);
+
   const handleSaveDelivery = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
     setFormSuccess(null);
 
     const parsedQty = parseInt(quantity, 10);
-    if (!selectedProductId) {
+    if (!selectedProductId || !selectedProduct) {
       setFormError('Please select a product.');
       return;
     }
@@ -72,8 +83,24 @@ export const StockInPage: React.FC = () => {
       return;
     }
 
+    if (tracksExpiry) {
+      if (!expiryDate) {
+        setFormError(
+          `Expiry date is required for "${selectedProduct.name}" because it tracks expiry.`
+        );
+        return;
+      }
+      if (expiryDate <= todayStr) {
+        setFormError(
+          'Expiry date must be in the future (after today).'
+        );
+        return;
+      }
+    }
+
     setSubmitting(true);
 
+    // 1. Insert delivery stock movement (trigger increases products.current_stock)
     const { error: insertError } = await supabase
       .from('stock_movements')
       .insert({
@@ -84,20 +111,45 @@ export const StockInPage: React.FC = () => {
         created_by: user?.id,
       });
 
-    setSubmitting(false);
-
     if (insertError) {
+      setSubmitting(false);
       setFormError(`Failed to record delivery: ${insertError.message}`);
       return;
     }
 
-    const product = products.find((p) => p.id === selectedProductId);
+    // 2. If product tracks expiry, create a batch in stock_batches
+    if (tracksExpiry) {
+      const { error: batchError } = await supabase
+        .from('stock_batches')
+        .insert({
+          product_id: selectedProductId,
+          received_on: todayStr,
+          expiry_date: expiryDate,
+          quantity_received: parsedQty,
+          quantity_remaining: parsedQty,
+          status: 'active',
+          loss_amount: 0,
+        });
+
+      if (batchError) {
+        setSubmitting(false);
+        setFormError(
+          `Delivery logged, but failed to create expiry batch: ${batchError.message}`
+        );
+        await loadData();
+        return;
+      }
+    }
+
+    setSubmitting(false);
+
     setFormSuccess(
       `Delivery logged: +${parsedQty} units added to ${
-        product?.name || 'product'
-      }.`
+        selectedProduct.name
+      }${tracksExpiry ? ` (batch expiry: ${expiryDate})` : ''}.`
     );
     setQuantity('10');
+    setExpiryDate('');
     setNote('');
     await loadData();
   };
@@ -122,12 +174,19 @@ export const StockInPage: React.FC = () => {
 
       {/* Record Delivery Form */}
       <Card style={{ padding: 'var(--space-md)' }}>
-        <h2
-          className="text-label-lg"
-          style={{ marginBottom: 'var(--space-sm)' }}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            marginBottom: 'var(--space-sm)',
+          }}
         >
-          Log supplier delivery
-        </h2>
+          <h2 className="text-label-lg">Log supplier delivery</h2>
+          {tracksExpiry && (
+            <Chip variant="active">Tracks expiry — batch required</Chip>
+          )}
+        </div>
 
         <form
           onSubmit={handleSaveDelivery}
@@ -161,6 +220,7 @@ export const StockInPage: React.FC = () => {
                 {products.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.name} ({p.sku}) — Current stock: {p.current_stock}
+                    {p.tracks_expiry ? ' [Tracks expiry]' : ''}
                   </option>
                 ))}
               </select>
@@ -176,6 +236,18 @@ export const StockInPage: React.FC = () => {
               onChange={(e) => setQuantity(e.target.value)}
               required
             />
+
+            {tracksExpiry && (
+              <Input
+                id="delivery-expiry-date"
+                label="Expiry date (required, must be in the future)"
+                type="date"
+                min={todayStr}
+                value={expiryDate}
+                onChange={(e) => setExpiryDate(e.target.value)}
+                required
+              />
+            )}
 
             <Input
               id="delivery-note"
@@ -308,4 +380,3 @@ export const StockInPage: React.FC = () => {
     </div>
   );
 };
-

@@ -161,7 +161,8 @@ STRICT RULES:
 3. Use alert labels ("Stock-out risk", "Low stock", "Overstock", "Slow mover") exactly as given.
 4. Never recommend reordering and reducing orders for the same product.
 5. When discussing urgent restocking or alerts, prioritise the top 5 urgent alerts (top_5_urgent_alerts_dashboard_order) first using the exact product names, stock levels, stock-out dates, and suggested reorder quantities provided.
-6. Format all money in Rwandan Francs as whole numbers like "RWF 12,500".
+6. When discussing expiring or expired stock (expiry_overview), suggest clearance or discounts for items expiring soon (and write-offs for already expired batches) using only the numbers provided.
+7. Format all money in Rwandan Francs as whole numbers like "RWF 12,500".
 
 VERIFIED SUPERMARKET DATA SUMMARY (JSON):
 ${JSON.stringify(compactSummary, null, 2)}`;

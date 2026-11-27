@@ -21,9 +21,27 @@ export interface Product {
   current_stock: number;
   reorder_level: number;
   is_active: boolean;
+  tracks_expiry?: boolean;
   categories?: {
     name: string;
   } | null;
+}
+
+export interface StockBatch {
+  id: string;
+  product_id: string;
+  product_name?: string;
+  product_sku?: string;
+  received_on: string;
+  expiry_date: string;
+  quantity_received: number;
+  quantity_remaining: number;
+  status: 'active' | 'written_off';
+  written_off_on: string | null;
+  written_off_by: string | null;
+  cost_price: number | null;
+  value_at_cost: number | null;
+  loss_amount: number | null;
 }
 
 export interface Sale {
@@ -44,7 +62,7 @@ export interface StockMovement {
   id: string;
   product_id: string;
   quantity: number;
-  type: 'delivery' | 'sale' | 'adjustment';
+  type: 'delivery' | 'sale' | 'adjustment' | 'write_off';
   note?: string | null;
   created_at: string;
   created_by: string | null;

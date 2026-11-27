@@ -2,7 +2,12 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { formatRWF } from '../lib/format';
 import { useAuth } from '../context/AuthContext';
-import { Product, Sale } from '../types/database';
+import { Product, Sale, StockBatch } from '../types/database';
+import {
+  computeExpiredActiveUnitsByProduct,
+  getSellableStock,
+  getTodayLocalStr,
+} from '../lib/alerts';
 import { Card } from '../components/ui/Card';
 import { Input } from '../components/ui/Input';
 import { Button } from '../components/ui/Button';
@@ -17,19 +22,12 @@ interface CsvPreviewRow {
   error?: string;
 }
 
-function getTodayDateString(): string {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
-
 export const SalesPage: React.FC = () => {
   const { user, profile } = useAuth();
   const isManager = profile?.role === 'manager';
 
   const [products, setProducts] = useState<Product[]>([]);
+  const [batches, setBatches] = useState<StockBatch[]>([]);
   const [recentSales, setRecentSales] = useState<Sale[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
 
@@ -37,7 +35,7 @@ export const SalesPage: React.FC = () => {
   const [productSearch, setProductSearch] = useState<string>('');
   const [selectedProductId, setSelectedProductId] = useState<string>('');
   const [quantity, setQuantity] = useState<string>('1');
-  const [soldOn, setSoldOn] = useState<string>(getTodayDateString());
+  const [soldOn, setSoldOn] = useState<string>(getTodayLocalStr());
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [formSuccess, setFormSuccess] = useState<string | null>(null);
@@ -55,17 +53,21 @@ export const SalesPage: React.FC = () => {
   const loadData = async () => {
     setLoading(true);
 
-    // 1. Load active products
-    const { data: prodData } = await supabase
-      .from('products')
-      .select(
-        'id, name, sku, category_id, cost_price, selling_price, current_stock, reorder_level, is_active'
-      )
-      .eq('is_active', true)
-      .order('name', { ascending: true });
+    // 1. Load active products and stock_batches_view (for sellable stock calculation)
+    const [prodRes, batchRes] = await Promise.all([
+      supabase
+        .from('products')
+        .select(
+          'id, name, sku, category_id, cost_price, selling_price, current_stock, reorder_level, is_active, tracks_expiry'
+        )
+        .eq('is_active', true)
+        .order('name', { ascending: true }),
+      supabase.from('stock_batches_view').select('*'),
+    ]);
 
-    const loadedProducts = (prodData as Product[]) || [];
+    const loadedProducts = (prodRes.data as Product[]) || [];
     setProducts(loadedProducts);
+    setBatches((batchRes.data as StockBatch[]) || []);
 
     if (!selectedProductId && loadedProducts.length > 0) {
       setSelectedProductId(loadedProducts[0].id);
@@ -75,7 +77,7 @@ export const SalesPage: React.FC = () => {
     let salesQuery = supabase
       .from('sales')
       .select(
-        'id, product_id, quantity, unit_price, unit_cost, sold_on, created_by, products(name, sku)'
+        'id, product_id, quantity, unit_price, sold_on, created_by, products(name, sku)'
       )
       .order('sold_on', { ascending: false })
       .limit(50);
@@ -83,7 +85,7 @@ export const SalesPage: React.FC = () => {
     if (!isManager && user) {
       salesQuery = salesQuery
         .eq('created_by', user.id)
-        .eq('sold_on', getTodayDateString());
+        .eq('sold_on', getTodayLocalStr());
     }
 
     const { data: salesData } = await salesQuery;
@@ -94,6 +96,12 @@ export const SalesPage: React.FC = () => {
   useEffect(() => {
     loadData();
   }, [isManager, user?.id]);
+
+  // Compute expired active units per product so sellableStock = current_stock - expiredUnits
+  const expiredUnitsByProduct = useMemo(
+    () => computeExpiredActiveUnitsByProduct(batches),
+    [batches]
+  );
 
   // Filter products by search input
   const matchingProducts = useMemo(() => {
@@ -119,6 +127,16 @@ export const SalesPage: React.FC = () => {
     () => products.find((p) => p.id === selectedProductId) || null,
     [products, selectedProductId]
   );
+
+  const selectedSellableStock = useMemo(() => {
+    if (!selectedProduct) return 0;
+    return getSellableStock(selectedProduct, expiredUnitsByProduct);
+  }, [selectedProduct, expiredUnitsByProduct]);
+
+  const selectedExpiredUnits = useMemo(() => {
+    if (!selectedProduct || !selectedProduct.tracks_expiry) return 0;
+    return expiredUnitsByProduct.get(selectedProduct.id) || 0;
+  }, [selectedProduct, expiredUnitsByProduct]);
 
   const parsedQty = Math.max(0, parseInt(quantity, 10) || 0);
   const lineTotal = selectedProduct
@@ -147,20 +165,51 @@ export const SalesPage: React.FC = () => {
 
     setSubmitting(true);
 
-    // Fetch latest current_stock from database to prevent overselling
-    const { data: freshProduct, error: stockErr } = await supabase
-      .from('products')
-      .select('current_stock, name')
-      .eq('id', selectedProduct.id)
-      .single();
+    // Fetch latest product stock and batches from database to prevent overselling or selling expired units
+    const [freshProdRes, freshBatchRes] = await Promise.all([
+      supabase
+        .from('products')
+        .select('id, current_stock, name, tracks_expiry')
+        .eq('id', selectedProduct.id)
+        .single(),
+      supabase
+        .from('stock_batches_view')
+        .select('*')
+        .eq('product_id', selectedProduct.id)
+        .eq('status', 'active'),
+    ]);
 
-    if (stockErr || !freshProduct) {
+    const freshProduct = freshProdRes.data;
+    if (freshProdRes.error || !freshProduct) {
       setSubmitting(false);
       setFormError('Could not verify current stock level. Please try again.');
       return;
     }
 
-    if (parsedQty > freshProduct.current_stock) {
+    const todayStr = getTodayLocalStr();
+    const productBatches = (freshBatchRes.data as StockBatch[]) || [];
+
+    if (freshProduct.tracks_expiry) {
+      // Sellable stock = current_stock minus units in expired active batches
+      const expiredUnits = productBatches
+        .filter((b) => b.quantity_remaining > 0 && b.expiry_date < todayStr)
+        .reduce((sum, b) => sum + b.quantity_remaining, 0);
+
+      const inDateSellableUnits = Math.max(
+        0,
+        freshProduct.current_stock - expiredUnits
+      );
+
+      if (parsedQty > inDateSellableUnits) {
+        setSubmitting(false);
+        setFormError(
+          `Cannot record sale for "${freshProduct.name}": only ${inDateSellableUnits} units are in date (requested ${parsedQty} units${
+            expiredUnits > 0 ? `; ${expiredUnits} units in stock are expired` : ''
+          }).`
+        );
+        return;
+      }
+    } else if (parsedQty > freshProduct.current_stock) {
       setSubmitting(false);
       setFormError(
         `Insufficient stock: cannot sell ${parsedQty} units of "${freshProduct.name}" because only ${freshProduct.current_stock} units are available in stock.`
@@ -185,7 +234,9 @@ export const SalesPage: React.FC = () => {
     }
 
     setFormSuccess(
-      `Sale recorded: ${parsedQty} × ${selectedProduct.name} (${formatRWF(lineTotal)}).`
+      `Sale recorded: ${parsedQty} × ${selectedProduct.name} (${formatRWF(
+        lineTotal
+      )}).`
     );
     setQuantity('1');
     await loadData();
@@ -318,7 +369,7 @@ export const SalesPage: React.FC = () => {
     setCsvMessage({
       type: 'success',
       text: `Successfully imported ${totalImported} sales row(s) (${
-        alsoAdjustStock ? 'stock adjusted' : 'current_stock unchanged'
+        alsoAdjustStock ? 'stock adjusted' : 'current_stock and batches unchanged'
       }).`,
     });
     await loadData();
@@ -338,7 +389,8 @@ export const SalesPage: React.FC = () => {
           className="text-body-sm"
           style={{ color: 'var(--color-secondary)', marginTop: '4px' }}
         >
-          Record customer purchases and automatically update supermarket stock.
+          Record customer purchases and automatically update supermarket stock
+          (earliest expiry first for perishable items).
         </p>
       </div>
 
@@ -391,11 +443,14 @@ export const SalesPage: React.FC = () => {
                 {matchingProducts.length === 0 ? (
                   <option value="">No matching products</option>
                 ) : (
-                  matchingProducts.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name} ({p.sku}) — Stock: {p.current_stock}
-                    </option>
-                  ))
+                  matchingProducts.map((p) => {
+                    const sellable = getSellableStock(p, expiredUnitsByProduct);
+                    return (
+                      <option key={p.id} value={p.id}>
+                        {p.name} ({p.sku}) — Available: {sellable}
+                      </option>
+                    );
+                  })
                 )}
               </select>
             </div>
@@ -421,7 +476,7 @@ export const SalesPage: React.FC = () => {
             />
           </div>
 
-          {/* Automatic Unit Price, Unit Cost, Stock & Line Total Summary */}
+          {/* Automatic Unit Price, (Manager-only Unit Cost), Sellable Stock & Line Total Summary */}
           <div
             style={{
               display: 'flex',
@@ -447,10 +502,16 @@ export const SalesPage: React.FC = () => {
                   className="text-label-sm"
                   style={{ color: 'var(--color-secondary)' }}
                 >
-                  Available stock
+                  Available stock (in date)
                 </div>
                 <div className="text-label-lg">
-                  {selectedProduct ? `${selectedProduct.current_stock} units` : '—'}
+                  {selectedProduct
+                    ? `${selectedSellableStock} units${
+                        selectedExpiredUnits > 0
+                          ? ` (${selectedExpiredUnits} expired)`
+                          : ''
+                      }`
+                    : '—'}
                 </div>
               </div>
 
@@ -468,17 +529,21 @@ export const SalesPage: React.FC = () => {
                 </div>
               </div>
 
-              <div>
-                <div
-                  className="text-label-sm"
-                  style={{ color: 'var(--color-secondary)' }}
-                >
-                  Unit cost (auto)
+              {isManager && (
+                <div>
+                  <div
+                    className="text-label-sm"
+                    style={{ color: 'var(--color-secondary)' }}
+                  >
+                    Unit cost (auto)
+                  </div>
+                  <div className="text-label-lg">
+                    {selectedProduct
+                      ? formatRWF(selectedProduct.cost_price)
+                      : '—'}
+                  </div>
                 </div>
-                <div className="text-label-lg">
-                  {selectedProduct ? formatRWF(selectedProduct.cost_price) : '—'}
-                </div>
-              </div>
+              )}
 
               <div>
                 <div
@@ -708,7 +773,9 @@ export const SalesPage: React.FC = () => {
         >
           <div>
             <h2 className="text-label-lg">
-              {isManager ? 'Recent sales (latest 50)' : "Your sales recorded today"}
+              {isManager
+                ? 'Recent sales (latest 50)'
+                : 'Your sales recorded today'}
             </h2>
           </div>
           <Chip>{recentSales.length} shown</Chip>
@@ -772,4 +839,3 @@ export const SalesPage: React.FC = () => {
     </div>
   );
 };
-

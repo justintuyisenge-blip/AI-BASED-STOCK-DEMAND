@@ -2,7 +2,12 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
-import { Forecast, ForecastDaily, Product } from '../types/database';
+import {
+  Forecast,
+  ForecastDaily,
+  Product,
+  StockBatch,
+} from '../types/database';
 import {
   AlertType,
   computeProductAlerts,
@@ -27,6 +32,7 @@ export const AlertsPage: React.FC = () => {
   const isManager = profile?.role === 'manager';
 
   const [products, setProducts] = useState<Product[]>([]);
+  const [batches, setBatches] = useState<StockBatch[]>([]);
   const [forecasts, setForecasts] = useState<Forecast[]>([]);
   const [forecastDaily, setForecastDaily] = useState<ForecastDaily[]>([]);
   const [hasForecastRun, setHasForecastRun] = useState<boolean>(false);
@@ -39,22 +45,26 @@ export const AlertsPage: React.FC = () => {
       setLoading(true);
       setError(null);
 
-      // 1. Load active products
-      const { data: prodData, error: prodErr } = await supabase
-        .from('products')
-        .select(
-          'id, name, sku, category_id, cost_price, selling_price, current_stock, reorder_level, is_active, categories(name)'
-        )
-        .eq('is_active', true)
-        .order('name', { ascending: true });
+      // 1. Load active products and stock_batches_view (for sellable stock calculation)
+      const [prodRes, batchRes] = await Promise.all([
+        supabase
+          .from('products')
+          .select(
+            'id, name, sku, category_id, cost_price, selling_price, current_stock, reorder_level, is_active, tracks_expiry, categories(name)'
+          )
+          .eq('is_active', true)
+          .order('name', { ascending: true }),
+        supabase.from('stock_batches_view').select('*'),
+      ]);
 
-      if (prodErr) {
-        setError(`Failed to load products: ${prodErr.message}`);
+      if (prodRes.error) {
+        setError(`Failed to load products: ${prodRes.error.message}`);
         setLoading(false);
         return;
       }
 
-      setProducts((prodData as unknown as Product[]) || []);
+      setProducts((prodRes.data as unknown as Product[]) || []);
+      setBatches((batchRes.data as StockBatch[]) || []);
 
       // Clerks only see low-stock alerts based on products only (no forecast queries)
       if (!isManager) {
@@ -122,9 +132,10 @@ export const AlertsPage: React.FC = () => {
         products,
         forecasts,
         forecastDaily,
+        batches,
         isManager,
       }),
-    [products, forecasts, forecastDaily, isManager]
+    [products, forecasts, forecastDaily, batches, isManager]
   );
 
   const filteredAlerts = useMemo(() => {

@@ -29,6 +29,7 @@ type SortDirection = 'asc' | 'desc';
 
 interface ProductForecastRow {
   product: Product;
+  hasForecast: boolean;
   units7: number;
   revenue7: number;
   profit7: number;
@@ -259,29 +260,38 @@ export const ForecastPage: React.FC = () => {
     return products.map((product) => {
       const f7 = byProductHorizon.get(`${product.id}_7`);
       const f30 = byProductHorizon.get(`${product.id}_30`);
+      const hasForecast = Boolean(f7 && f30);
 
-      const units7 = f7?.predicted_units ?? 0;
-      const revenue7 = f7?.predicted_revenue ?? 0;
-      const profit7 = f7?.predicted_profit ?? 0;
+      const units7 = hasForecast ? f7?.predicted_units ?? 0 : 0;
+      const revenue7 = hasForecast ? f7?.predicted_revenue ?? 0 : 0;
+      const profit7 = hasForecast ? f7?.predicted_profit ?? 0 : 0;
 
-      const units30 = f30?.predicted_units ?? 0;
-      const revenue30 = f30?.predicted_revenue ?? 0;
-      const profit30 = f30?.predicted_profit ?? 0;
+      const units30 = hasForecast ? f30?.predicted_units ?? 0 : 0;
+      const revenue30 = hasForecast ? f30?.predicted_revenue ?? 0 : 0;
+      const profit30 = hasForecast ? f30?.predicted_profit ?? 0 : 0;
 
-      const wape = Number(f30?.wape ?? f7?.wape ?? 0);
-      const baselineWape = Number(f30?.baseline_wape ?? f7?.baseline_wape ?? 0);
+      const rawWape = Number(f30?.wape ?? f7?.wape ?? 0);
+      const rawBaselineWape = Number(
+        f30?.baseline_wape ?? f7?.baseline_wape ?? 0
+      );
+      const wape = Number.isFinite(rawWape) ? rawWape : 0;
+      const baselineWape = Number.isFinite(rawBaselineWape)
+        ? rawBaselineWape
+        : 0;
 
       // Estimated days of stock left based on 30-day predicted daily velocity
       const dailyRate = units30 / 30;
-      const daysLeft =
-        product.current_stock <= 0
-          ? 0
-          : dailyRate > 0
-          ? Math.round(product.current_stock / dailyRate)
-          : 999;
+      const daysLeft = !hasForecast
+        ? 9999
+        : product.current_stock <= 0
+        ? 0
+        : dailyRate > 0
+        ? Math.round(product.current_stock / dailyRate)
+        : 999;
 
       return {
         product,
+        hasForecast,
         units7,
         revenue7,
         profit7,
@@ -295,7 +305,7 @@ export const ForecastPage: React.FC = () => {
     });
   }, [products, forecasts]);
 
-  // Aggregate summary metrics across all active products
+  // Aggregate summary metrics across products that have sufficient history for a forecast
   const summary = useMemo(() => {
     let totalUnits7 = 0;
     let totalRevenue7 = 0;
@@ -308,6 +318,9 @@ export const ForecastPage: React.FC = () => {
     let weightTotal = 0;
 
     for (const row of productRows) {
+      // Leave products with fewer than 28 days of history out of totals and accuracy
+      if (!row.hasForecast) continue;
+
       totalUnits7 += row.units7;
       totalRevenue7 += row.revenue7;
       totalProfit7 += row.profit7;
@@ -792,7 +805,7 @@ export const ForecastPage: React.FC = () => {
               <tbody>
                 {sortedRows.map((row) => {
                   const isSelected = row.product.id === selectedProductId;
-                  const isLowDays = row.daysLeft <= 7;
+                  const isLowDays = row.hasForecast && row.daysLeft <= 7;
 
                   return (
                     <tr
@@ -814,34 +827,51 @@ export const ForecastPage: React.FC = () => {
                           {row.product.sku}
                         </div>
                       </td>
-                      <td className="text-label-lg">
-                        {row.units7.toLocaleString()}
-                      </td>
-                      <td className="text-label-lg">
-                        {row.units30.toLocaleString()}
-                      </td>
-                      <td className="text-label-lg">
-                        {formatRWF(row.profit30)}
-                      </td>
-                      <td>{row.product.current_stock.toLocaleString()}</td>
-                      <td>
-                        <div
-                          style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: 'var(--space-xs)',
-                          }}
-                        >
-                          <span className="text-label-lg">
-                            {row.daysLeft >= 999
-                              ? '90+ days'
-                              : `${row.daysLeft} days`}
-                          </span>
-                          {isLowDays && (
-                            <Chip variant="error">Reorder soon</Chip>
-                          )}
-                        </div>
-                      </td>
+                      {row.hasForecast ? (
+                        <>
+                          <td className="text-label-lg">
+                            {row.units7.toLocaleString()}
+                          </td>
+                          <td className="text-label-lg">
+                            {row.units30.toLocaleString()}
+                          </td>
+                          <td className="text-label-lg">
+                            {formatRWF(row.profit30)}
+                          </td>
+                          <td>{row.product.current_stock.toLocaleString()}</td>
+                          <td>
+                            <div
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 'var(--space-xs)',
+                              }}
+                            >
+                              <span className="text-label-lg">
+                                {row.daysLeft >= 999
+                                  ? '90+ days'
+                                  : `${row.daysLeft} days`}
+                              </span>
+                              {isLowDays && (
+                                <Chip variant="error">Reorder soon</Chip>
+                              )}
+                            </div>
+                          </td>
+                        </>
+                      ) : (
+                        <>
+                          <td colSpan={3}>
+                            <Chip>Not enough history yet</Chip>
+                          </td>
+                          <td>{row.product.current_stock.toLocaleString()}</td>
+                          <td
+                            className="text-body-sm"
+                            style={{ color: 'var(--color-secondary)' }}
+                          >
+                            Not enough history yet
+                          </td>
+                        </>
+                      )}
                     </tr>
                   );
                 })}

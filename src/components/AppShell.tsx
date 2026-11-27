@@ -5,6 +5,7 @@ import {
   Package,
   ShoppingCart,
   ArrowDownToLine,
+  CalendarClock,
   TrendingUp,
   Bell,
   Sparkles,
@@ -25,7 +26,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   {
     label: 'Dashboard',
-    to: '/',
+    to: '/dashboard',
     icon: <LayoutDashboard size={17} />,
   },
   {
@@ -42,6 +43,11 @@ const NAV_ITEMS: NavItem[] = [
     label: 'Stock In',
     to: '/stock-in',
     icon: <ArrowDownToLine size={17} />,
+  },
+  {
+    label: 'Expiry',
+    to: '/expiry',
+    icon: <CalendarClock size={17} />,
   },
   {
     label: 'Forecast',
@@ -98,7 +104,7 @@ export const AppShell: React.FC = () => {
               <NavLink
                 key={item.to}
                 to={item.to}
-                end={item.to === '/'}
+                end={item.to === '/dashboard'}
                 className={({ isActive }) =>
                   `sidebar-link text-label-lg ${
                     isActive ? 'sidebar-link--active' : ''

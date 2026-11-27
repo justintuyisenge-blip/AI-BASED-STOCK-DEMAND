@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Navigate } from 'react-router-dom';
+import { Link, Navigate, useLocation } from 'react-router-dom';
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { Card } from '../components/ui/Card';
@@ -8,13 +8,18 @@ import { Button } from '../components/ui/Button';
 
 export const LoginPage: React.FC = () => {
   const { user, loading } = useAuth();
+  const location = useLocation();
+  const resetSuccessMessage =
+    (location.state as { resetSuccessMessage?: string } | null)
+      ?.resetSuccessMessage || null;
+
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   if (!loading && user) {
-    return <Navigate to="/products" replace />;
+    return <Navigate to="/dashboard" replace />;
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -79,6 +84,20 @@ export const LoginPage: React.FC = () => {
               gap: 'var(--space-sm)',
             }}
           >
+            {resetSuccessMessage && (
+              <div
+                className="text-body-sm"
+                style={{
+                  color: 'var(--color-primary)',
+                  backgroundColor: 'var(--color-primary-20)',
+                  padding: '8px 10px',
+                  borderRadius: 'var(--radius-sm)',
+                }}
+              >
+                {resetSuccessMessage}
+              </div>
+            )}
+
             <Input
               id="email"
               label="Email address"
@@ -90,16 +109,32 @@ export const LoginPage: React.FC = () => {
               autoComplete="email"
             />
 
-            <Input
-              id="password"
-              label="Password"
-              type="password"
-              placeholder="Enter your password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-              autoComplete="current-password"
-            />
+            <div>
+              <Input
+                id="password"
+                label="Password"
+                type="password"
+                placeholder="Enter your password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+                autoComplete="current-password"
+              />
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'flex-end',
+                  marginTop: 'var(--space-xs)',
+                }}
+              >
+                <Link
+                  to="/forgot-password"
+                  className="ui-btn ui-btn--link text-label-md"
+                >
+                  Forgot password?
+                </Link>
+              </div>
+            </div>
 
             {errorMessage && (
               <div
@@ -129,4 +164,3 @@ export const LoginPage: React.FC = () => {
     </div>
   );
 };
-

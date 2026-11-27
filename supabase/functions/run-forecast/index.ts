@@ -228,16 +228,20 @@ function predictUnits(features: number[], weights: number[]): number {
 
 /**
  * Compute Weighted Absolute Percentage Error (WAPE) in percent [0..100+].
+ * Guarded so zero sales in the test window can never cause a divide-by-zero or NaN.
  */
 function computeWape(actuals: number[], predictions: number[]): number {
   let sumAbsError = 0;
   let sumActual = 0;
   for (let i = 0; i < actuals.length; i++) {
-    sumAbsError += Math.abs(actuals[i] - predictions[i]);
-    sumActual += actuals[i];
+    const act = Number.isFinite(actuals[i]) ? actuals[i] : 0;
+    const pred = Number.isFinite(predictions[i]) ? predictions[i] : 0;
+    sumAbsError += Math.abs(act - pred);
+    sumActual += act;
   }
-  if (sumActual === 0) return 0;
-  return Number(((sumAbsError / sumActual) * 100).toFixed(2));
+  if (sumActual <= 0 || !Number.isFinite(sumActual)) return 0;
+  const raw = (sumAbsError / sumActual) * 100;
+  return Number.isFinite(raw) ? Number(raw.toFixed(2)) : 0;
 }
 
 Deno.serve(async (req: Request) => {
@@ -420,9 +424,21 @@ Deno.serve(async (req: Request) => {
       generated_at: string;
     }> = [];
 
+    let forecastedCount = 0;
+    let skippedInsufficientHistoryCount = 0;
+
     // 4. Train, backtest, and forecast for each active product
     for (const product of products as ProductRow[]) {
       const dateMap = salesByProductDate.get(product.id);
+
+      // A product with fewer than 28 days of sales history gets no forecast
+      const daysWithSales = dateMap ? dateMap.size : 0;
+      if (daysWithSales < 28) {
+        skippedInsufficientHistoryCount += 1;
+        continue;
+      }
+
+      forecastedCount += 1;
 
       // Build 180-day daily sales series (days with no sales = 0)
       const dailySeries: number[] = historyDateStrings.map(
@@ -522,21 +538,24 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    const { error: summaryErr } = await adminClient
-      .from('forecasts')
-      .insert(forecastSummaryRows);
+    if (forecastSummaryRows.length > 0) {
+      const { error: summaryErr } = await adminClient
+        .from('forecasts')
+        .insert(forecastSummaryRows);
 
-    if (summaryErr) {
-      throw new Error(
-        `Failed to insert forecasts summary rows: ${summaryErr.message}`
-      );
+      if (summaryErr) {
+        throw new Error(
+          `Failed to insert forecasts summary rows: ${summaryErr.message}`
+        );
+      }
     }
 
     return new Response(
       JSON.stringify({
         run_id: runId,
         generated_at: generatedAt,
-        products_forecasted: products.length,
+        products_forecasted: forecastedCount,
+        products_skipped_insufficient_history: skippedInsufficientHistoryCount,
       }),
       {
         status: 200,

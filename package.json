@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "seed": "tsx scripts/seed.ts"
+    "seed": "tsx scripts/seed.ts",
+    "seed:expiry": "tsx scripts/seed-expiry.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.1",

@@ -504,4 +504,214 @@ body,
   padding: 1px 5px;
 }
 
+/* ============================================================================
+   Accessible Keyboard Focus & Responsive App Shell / Landing Page Styles
+   ============================================================================ */
+
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+@media (max-width: 768px) {
+  .app-shell {
+    flex-direction: column;
+  }
+
+  .app-sidebar {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--color-border-subtle);
+    padding: var(--space-sm);
+  }
+
+  .sidebar-nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .app-main {
+    padding: var(--space-md) var(--space-sm);
+  }
+}
+
+/* Landing Page Layout */
+.landing-page {
+  min-height: 100vh;
+  background-color: var(--color-surface);
+  color: var(--color-on-surface);
+  overflow-x: hidden;
+}
+
+.landing-container {
+  width: 100%;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 var(--space-sm);
+}
+
+@media (min-width: 768px) {
+  .landing-container {
+    padding: 0 var(--space-md);
+  }
+}
+
+.landing-header {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  background-color: var(--color-neutral);
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.landing-header-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 64px;
+  gap: var(--space-sm);
+}
+
+.landing-nav-desktop {
+  display: none;
+  align-items: center;
+  gap: var(--space-md);
+}
+
+.landing-menu-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  cursor: pointer;
+  color: var(--color-on-surface);
+}
+
+.landing-nav-mobile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-sm);
+  background-color: var(--color-neutral);
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+@media (min-width: 768px) {
+  .landing-nav-desktop {
+    display: flex;
+  }
+
+  .landing-menu-toggle,
+  .landing-nav-mobile {
+    display: none;
+  }
+}
+
+.landing-hero {
+  padding: var(--space-lg) 0;
+}
+
+.landing-hero-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-md);
+  align-items: start;
+}
+
+.landing-hero-title {
+  font-family: var(--font-sans);
+  font-size: 34px;
+  font-weight: 550;
+  line-height: 38px;
+  letter-spacing: -1.1px;
+  color: var(--color-on-surface);
+}
+
+@media (min-width: 768px) {
+  .landing-hero {
+    padding: var(--space-xl) 0;
+  }
+
+  .landing-hero-title {
+    font-size: 45px;
+    line-height: 51.04px;
+    letter-spacing: -1.6px;
+  }
+}
+
+@media (min-width: 1080px) {
+  .landing-hero-grid {
+    grid-template-columns: 1.05fr 0.95fr;
+    gap: var(--space-lg);
+    align-items: center;
+  }
+
+  .landing-hero-title {
+    font-size: 56px;
+    line-height: 58px;
+    letter-spacing: -2.2px;
+  }
+}
+
+.landing-section {
+  padding: var(--space-lg) 0;
+  border-top: 1px solid var(--color-border-subtle);
+}
+
+.landing-features-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-sm);
+}
+
+@media (min-width: 640px) {
+  .landing-features-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1024px) {
+  .landing-features-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.landing-steps-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-sm);
+}
+
+@media (min-width: 640px) {
+  .landing-steps-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1024px) {
+  .landing-steps-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+.landing-roles-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-sm);
+}
+
+@media (min-width: 768px) {
+  .landing-roles-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+
 

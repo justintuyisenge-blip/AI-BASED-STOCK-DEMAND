@@ -9,22 +9,26 @@ import {
   Forecast,
   ForecastDaily,
   Product,
+  StockBatch,
 } from '../types/database';
 import {
+  computeExpiredActiveUnitsByProduct,
   computeProductAlerts,
   fetchAllForecastDailyForRun,
+  getSellableStock,
+  getTodayLocalStr,
 } from '../lib/alerts';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import { Chip } from '../components/ui/Chip';
 import { MarkdownContent } from '../components/ui/MarkdownContent';
 
-function getTodayDateString(): string {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+function computeDaysDifference(expiryDateStr: string, todayStr: string): number {
+  const [ey, em, ed] = expiryDateStr.split('-').map(Number);
+  const [ty, tm, td] = todayStr.split('-').map(Number);
+  const expiryUtc = Date.UTC(ey, em - 1, ed);
+  const todayUtc = Date.UTC(ty, tm - 1, td);
+  return Math.round((expiryUtc - todayUtc) / 86400000);
 }
 
 export const DashboardPage: React.FC = () => {
@@ -32,6 +36,7 @@ export const DashboardPage: React.FC = () => {
   const isManager = profile?.role === 'manager';
 
   const [products, setProducts] = useState<Product[]>([]);
+  const [batches, setBatches] = useState<StockBatch[]>([]);
   const [forecasts, setForecasts] = useState<Forecast[]>([]);
   const [forecastDaily, setForecastDaily] = useState<ForecastDaily[]>([]);
   const [hasForecastRun, setHasForecastRun] = useState<boolean>(false);
@@ -42,6 +47,8 @@ export const DashboardPage: React.FC = () => {
   const [insight, setInsight] = useState<AiInsight | null>(null);
   const [insightLoading, setInsightLoading] = useState<boolean>(false);
   const [insightError, setInsightError] = useState<string | null>(null);
+
+  const todayStr = useMemo(() => getTodayLocalStr(), []);
 
   const requestAiInsight = async (forceRefresh: boolean) => {
     setInsightLoading(true);
@@ -98,25 +105,29 @@ export const DashboardPage: React.FC = () => {
     const loadDashboard = async () => {
       setLoading(true);
 
-      // 1. Load active products
-      const { data: prodData } = await supabase
-        .from('products')
-        .select(
-          'id, name, sku, category_id, cost_price, selling_price, current_stock, reorder_level, is_active, categories(name)'
-        )
-        .eq('is_active', true)
-        .order('name', { ascending: true });
+      // 1. Load active products and stock_batches_view (for sellable stock & expiry KPIs)
+      const [prodRes, batchRes] = await Promise.all([
+        supabase
+          .from('products')
+          .select(
+            'id, name, sku, category_id, cost_price, selling_price, current_stock, reorder_level, is_active, tracks_expiry, categories(name)'
+          )
+          .eq('is_active', true)
+          .order('name', { ascending: true }),
+        supabase.from('stock_batches_view').select('*'),
+      ]);
 
-      setProducts((prodData as unknown as Product[]) || []);
+      setProducts((prodRes.data as unknown as Product[]) || []);
+      setBatches((batchRes.data as StockBatch[]) || []);
 
-      // Clerk view: only low-stock products and the number of sales they recorded today
+      // Clerk view: only low-stock products, expiry counts, and the number of sales they recorded today
       if (!isManager) {
         if (user) {
           const { count } = await supabase
             .from('sales')
             .select('id', { count: 'exact', head: true })
             .eq('created_by', user.id)
-            .eq('sold_on', getTodayDateString());
+            .eq('sold_on', getTodayLocalStr());
           setClerkSalesTodayCount(count || 0);
         }
         setLoading(false);
@@ -180,21 +191,68 @@ export const DashboardPage: React.FC = () => {
     loadDashboard();
   }, [isManager, user?.id]);
 
-  // Low-stock items (used by both manager and clerk)
+  // Compute expired active units per product so sellableStock = current_stock - expiredUnits
+  const expiredUnitsByProduct = useMemo(
+    () => computeExpiredActiveUnitsByProduct(batches, todayStr),
+    [batches, todayStr]
+  );
+
+  // Expiry summary for Dashboard card ("Expired / expiring within 7 days")
+  const expiryStats = useMemo(() => {
+    let expiredUnits = 0;
+    let expiredBatchesCount = 0;
+    let expiredCost = 0;
+
+    let within7Units = 0;
+    let within7BatchesCount = 0;
+    let within7Cost = 0;
+
+    for (const b of batches) {
+      if (b.status !== 'active' || b.quantity_remaining <= 0) continue;
+      const daysLeft = computeDaysDifference(b.expiry_date, todayStr);
+      const costVal = Number(b.value_at_cost ?? 0);
+
+      if (daysLeft < 0) {
+        expiredUnits += b.quantity_remaining;
+        expiredBatchesCount += 1;
+        expiredCost += costVal;
+      } else if (daysLeft <= 7) {
+        within7Units += b.quantity_remaining;
+        within7BatchesCount += 1;
+        within7Cost += costVal;
+      }
+    }
+
+    return {
+      expiredUnits,
+      expiredBatchesCount,
+      expiredCost,
+      within7Units,
+      within7BatchesCount,
+      within7Cost,
+      totalCost: expiredCost + within7Cost,
+    };
+  }, [batches, todayStr]);
+
+  // Low-stock items using sellable stock (used by both manager and clerk)
   const lowStockProducts = useMemo(
     () =>
       products
-        .filter((p) => p.current_stock <= p.reorder_level)
-        .sort((a, b) => a.current_stock - b.current_stock),
-    [products]
+        .map((p) => ({
+          product: p,
+          sellableStock: getSellableStock(p, expiredUnitsByProduct),
+        }))
+        .filter(({ product, sellableStock }) => sellableStock <= product.reorder_level)
+        .sort((a, b) => a.sellableStock - b.sellableStock),
+    [products, expiredUnitsByProduct]
   );
 
-  // Manager metrics
+  // Manager metrics (using sellable stock for stock value at cost)
   const managerMetrics = useMemo(() => {
-    const stockValueAtCost = products.reduce(
-      (sum, p) => sum + p.current_stock * p.cost_price,
-      0
-    );
+    const stockValueAtCost = products.reduce((sum, p) => {
+      const sellable = getSellableStock(p, expiredUnitsByProduct);
+      return sum + sellable * p.cost_price;
+    }, 0);
 
     let profit7 = 0;
     let profit30 = 0;
@@ -224,8 +282,9 @@ export const DashboardPage: React.FC = () => {
     const modelAccuracy = Math.max(0, Math.min(100, 100 - avgWape));
     const baselineAccuracy = Math.max(0, Math.min(100, 100 - avgBaselineWape));
 
-    // Top 5 products by predicted 30-day profit
+    // Top 5 products by predicted 30-day profit (only products with a forecast)
     const top5ByProfit = products
+      .filter((product) => f30ByProduct.has(product.id))
       .map((product) => {
         const f30 = f30ByProduct.get(product.id);
         return {
@@ -247,18 +306,19 @@ export const DashboardPage: React.FC = () => {
       avgWape,
       top5ByProfit,
     };
-  }, [products, forecasts]);
+  }, [products, forecasts, expiredUnitsByProduct]);
 
-  // 5 most urgent alerts for manager
+  // 5 most urgent alerts for manager (using sellable stock)
   const urgentAlerts = useMemo(
     () =>
       computeProductAlerts({
         products,
         forecasts,
         forecastDaily,
+        batches,
         isManager,
       }).slice(0, 5),
-    [products, forecasts, forecastDaily, isManager]
+    [products, forecasts, forecastDaily, batches, isManager]
   );
 
   if (loading) {
@@ -276,7 +336,7 @@ export const DashboardPage: React.FC = () => {
   }
 
   // ==========================================================================
-  // CLERK VIEW: low-stock list and the number of sales they recorded today
+  // CLERK VIEW: low-stock list, sales recorded today, and expiry counts (NO costs)
   // ==========================================================================
   if (!isManager) {
     return (
@@ -293,7 +353,7 @@ export const DashboardPage: React.FC = () => {
             className="text-body-sm"
             style={{ color: 'var(--color-secondary)', marginTop: '4px' }}
           >
-            Daily clerk summary and low-stock shelf monitoring.
+            Daily clerk summary, expiry monitoring, and low-stock shelf status.
           </p>
         </div>
 
@@ -352,6 +412,32 @@ export const DashboardPage: React.FC = () => {
               </Link>
             </div>
           </Card>
+
+          <Card style={{ padding: 'var(--space-md)' }}>
+            <div
+              className="text-label-md"
+              style={{ color: 'var(--color-secondary)' }}
+            >
+              Expired / expiring within 7 days
+            </div>
+            <div
+              className="text-headline-sm"
+              style={{
+                marginTop: 'var(--space-xs)',
+                color:
+                  expiryStats.expiredUnits > 0
+                    ? 'var(--color-error)'
+                    : 'var(--color-on-surface)',
+              }}
+            >
+              {expiryStats.expiredUnits} expired · {expiryStats.within7Units} in 7d
+            </div>
+            <div style={{ marginTop: 'var(--space-xs)' }}>
+              <Link to="/expiry" className="ui-btn ui-btn--link text-label-md">
+                Manage batch expiry →
+              </Link>
+            </div>
+          </Card>
         </div>
 
         <Card>
@@ -384,13 +470,13 @@ export const DashboardPage: React.FC = () => {
                   <tr>
                     <th>Product</th>
                     <th>Category</th>
-                    <th>Current stock</th>
+                    <th>Sellable stock</th>
                     <th>Reorder level</th>
                     <th>Status</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {lowStockProducts.map((p) => (
+                  {lowStockProducts.map(({ product: p, sellableStock }) => (
                     <tr key={p.id}>
                       <td>
                         <div className="text-label-lg">{p.name}</div>
@@ -404,7 +490,7 @@ export const DashboardPage: React.FC = () => {
                       <td>
                         <Chip>{p.categories?.name || 'Uncategorized'}</Chip>
                       </td>
-                      <td className="text-label-lg">{p.current_stock}</td>
+                      <td className="text-label-lg">{sellableStock}</td>
                       <td>{p.reorder_level}</td>
                       <td>
                         <Chip variant="error">Low stock</Chip>
@@ -437,8 +523,8 @@ export const DashboardPage: React.FC = () => {
           className="text-body-sm"
           style={{ color: 'var(--color-secondary)', marginTop: '4px' }}
         >
-          Executive overview of supermarket stock value, predicted RWF profit,
-          urgent alerts, and AI inventory recommendations.
+          Executive overview of supermarket sellable stock value, predicted RWF
+          profit, expiry risk, urgent alerts, and AI inventory recommendations.
         </p>
       </div>
 
@@ -461,7 +547,7 @@ export const DashboardPage: React.FC = () => {
             className="text-label-sm"
             style={{ color: 'var(--color-secondary)', marginTop: '6px' }}
           >
-            Across {products.length} active products
+            Sellable stock across {products.length} products
           </div>
         </Card>
 
@@ -488,7 +574,7 @@ export const DashboardPage: React.FC = () => {
             className="text-label-sm"
             style={{ color: 'var(--color-secondary)', marginTop: '6px' }}
           >
-            Stock ≤ reorder level
+            Sellable stock ≤ reorder level
           </div>
         </Card>
 
@@ -545,6 +631,65 @@ export const DashboardPage: React.FC = () => {
           </div>
         </Card>
       </div>
+
+      {/* Expired / Expiring Within 7 Days Card (Manager view includes value at cost) */}
+      <Card style={{ padding: 'var(--space-md)' }}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: 'var(--space-sm)',
+          }}
+        >
+          <div>
+            <div
+              className="text-label-md"
+              style={{ color: 'var(--color-secondary)' }}
+            >
+              Expired / expiring within 7 days
+            </div>
+            <div
+              className="text-headline-sm"
+              style={{
+                marginTop: '4px',
+                color:
+                  expiryStats.expiredUnits > 0
+                    ? 'var(--color-error)'
+                    : 'var(--color-on-surface)',
+              }}
+            >
+              {expiryStats.expiredUnits.toLocaleString()} expired units (
+              {expiryStats.expiredBatchesCount} batches) ·{' '}
+              {expiryStats.within7Units.toLocaleString()} units expiring in 7d (
+              {expiryStats.within7BatchesCount} batches)
+            </div>
+            <div
+              className="text-body-sm"
+              style={{ color: 'var(--color-secondary)', marginTop: '4px' }}
+            >
+              Value at cost:{' '}
+              <strong style={{ color: 'var(--color-on-surface)' }}>
+                {formatRWF(expiryStats.expiredCost)}
+              </strong>{' '}
+              expired ·{' '}
+              <strong style={{ color: 'var(--color-on-surface)' }}>
+                {formatRWF(expiryStats.within7Cost)}
+              </strong>{' '}
+              expiring within 7 days (total at risk:{' '}
+              <strong style={{ color: 'var(--color-on-surface)' }}>
+                {formatRWF(expiryStats.totalCost)}
+              </strong>
+              )
+            </div>
+          </div>
+
+          <Link to="/expiry" className="ui-btn ui-btn--secondary">
+            Manage expiry batches →
+          </Link>
+        </div>
+      </Card>
 
       {/* Friendly empty state if no forecast has been run yet */}
       {!hasForecastRun && (
@@ -771,7 +916,7 @@ export const DashboardPage: React.FC = () => {
                   <tr>
                     <th>Product</th>
                     <th>Alert</th>
-                    <th>Stock</th>
+                    <th>Sellable stock</th>
                     <th>Suggested reorder</th>
                   </tr>
                 </thead>
@@ -821,4 +966,3 @@ export const DashboardPage: React.FC = () => {
     </div>
   );
 };
-

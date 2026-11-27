@@ -35,9 +35,9 @@ export const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
     return <Navigate to="/login" replace />;
   }
 
-  // If route restricts by role and user's role is not allowed, redirect to /products
+  // If route restricts by role and user's role is not allowed, redirect to /dashboard
   if (allowedRoles && profile && !allowedRoles.includes(profile.role)) {
-    return <Navigate to="/products" replace />;
+    return <Navigate to="/dashboard" replace />;
   }
 
   return <>{children}</>;
